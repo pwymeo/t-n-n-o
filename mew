@@ -1,0 +1,212 @@
+
+const {
+  Client,
+  GatewayIntentBits,
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle
+} = require("discord.js");
+
+const fs = require("fs");
+require("dotenv").config();
+
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent
+  ]
+});
+
+const ARCHIVE_CHANNEL_ID = "1565223122146300024";
+const DATA_FILE = "./images.json";
+
+// Load dữ liệu cũ
+let database = [];
+
+if (fs.existsSync(DATA_FILE)) {
+  database = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
+}
+
+function saveDatabase() {
+  fs.writeFileSync(
+    DATA_FILE,
+    JSON.stringify(database, null, 2)
+  );
+}
+
+function isImage(file) {
+  return file.contentType?.startsWith("image/") ||
+    /\.(png|jpe?g|gif|webp|bmp)$/i.test(file.name || "");
+}
+
+// BOT ONLINE
+client.once("ready", () => {
+  console.log(`Bot online: ${client.user.tag}`);
+});
+
+// NHẬN VÀ LƯU ẢNH
+client.on("messageCreate", async message => {
+  if (!message.guild || message.author.bot) return;
+
+  if (message.channel.id === ARCHIVE_CHANNEL_ID) return;
+
+  // TÌM ẢNH
+  if (message.content.startsWith("!find ")) {
+    const name = message.content.slice(6).trim();
+
+    if (!name) return;
+
+    const results = database.filter(
+      item => item.name.toLowerCase() === name.toLowerCase()
+    );
+
+    if (!results.length) {
+      return message.reply("Không tìm thấy hình ảnh này!");
+    }
+
+    let page = 0;
+
+    const archive = await client.channels.fetch(ARCHIVE_CHANNEL_ID);
+
+    if (!archive) {
+      return message.reply("Không tìm thấy kênh lưu trữ!");
+    }
+
+    const render = async () => {
+      const item = results[page];
+
+      const storedMessage = await archive.messages.fetch(
+        item.messageId
+      );
+
+      const attachment = storedMessage.attachments.get(
+        item.attachmentId
+      );
+
+      if (!attachment) throw new Error("Ảnh không còn tồn tại.");
+
+      const embed = new EmbedBuilder()
+        .setColor("#F5B7D5")
+        .setTitle(`♡ ${item.name}`)
+        .setImage(attachment.url)
+        .setFooter({
+          text: `Image ${page + 1}/${results.length}`
+        });
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId("previous")
+          .setLabel("◀")
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(page === 0),
+
+        new ButtonBuilder()
+          .setCustomId("next")
+          .setLabel("▶")
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(page === results.length - 1)
+      );
+
+      return { embeds: [embed], components: [row] };
+    };
+
+    const sent = await message.reply(await render());
+
+    const collector = sent.createMessageComponentCollector({
+      time: 120000
+    });
+
+    collector.on("collect", async interaction => {
+      if (interaction.user.id !== message.author.id) {
+        return interaction.reply({
+          content: "Đây không phải bộ ảnh bạn đang xem!",
+          ephemeral: true
+        });
+      }
+
+      if (interaction.customId === "previous") page--;
+      if (interaction.customId === "next") page++;
+
+      await interaction.update(await render());
+    });
+
+    collector.on("end", async () => {
+      try {
+        await sent.edit({ components: [] });
+      } catch {}
+    });
+
+    return;
+  }
+
+  // NHẬN ẢNH
+  const images = [...message.attachments.values()].filter(isImage);
+
+  if (!images.length) return;
+
+  const prompt = await message.reply(
+    "♡ Bạn muốn đặt tên gì cho hình ảnh này?\n" +
+    "Hãy trả lời tin nhắn này trong vòng 60 giây nhé!"
+  );
+
+  try {
+    const collected = await message.channel.awaitMessages({
+      filter: m =>
+        m.author.id === message.author.id &&
+        !m.author.bot &&
+        m.reference?.messageId === prompt.id,
+      max: 1,
+      time: 60000,
+      errors: ["time"]
+    });
+
+    const name = collected.first().content.trim();
+
+    if (!name || name.length > 100) {
+      return prompt.edit("Tên ảnh không hợp lệ!");
+    }
+
+    const archive = await client.channels.fetch(ARCHIVE_CHANNEL_ID);
+
+    if (!archive || !archive.isTextBased()) {
+      return prompt.edit("Không thể truy cập kênh lưu trữ!");
+    }
+
+    const savedMessage = await archive.send({
+      content:
+        `♡ Tên: ${name}\n` +
+        `Người gửi: ${message.author.tag}`,
+      files: images.slice(0, 10).map((img, i) => ({
+        attachment: img.url,
+        name: img.name || `image_${i + 1}.png`
+      }))
+    });
+
+    for (const attachment of savedMessage.attachments.values()) {
+      database.push({
+        name,
+        messageId: savedMessage.id,
+        attachmentId: attachment.id,
+        userId: message.author.id,
+        createdAt: Date.now()
+      });
+    }
+
+    saveDatabase();
+
+    await prompt.edit(
+      `♡ Đã lưu thành công ${savedMessage.attachments.size} ảnh với tên **${name}**!`
+    );
+
+  } catch (error) {
+    console.error(error);
+
+    await prompt.edit(
+      "Hết thời gian chờ hoặc có lỗi khi lưu ảnh. Bạn thử lại nhé!"
+    ).catch(() => {});
+  }
+});
+
+client.login(process.env.TOKEN);
